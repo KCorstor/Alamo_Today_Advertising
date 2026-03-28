@@ -1,0 +1,7 @@
+# Status: no_website_in_csv
+
+{
+  "csv_data_row": 2,
+  "note": "No website URL in CSV for this row — scraper had nothing to fetch.",
+  "business": "Peddintamma Temple (expected for row 2 in your file)"
+}
