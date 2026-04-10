@@ -1,6 +1,7 @@
-"""One-off run: businesses near Alamo, CA via Places API (New) Nearby Search."""
+"""One-off run: businesses near a town via Places API (New) Nearby Search."""
 import argparse
 import os
+import re
 import time
 
 import pandas as pd
@@ -11,6 +12,14 @@ load_dotenv()
 
 TOWN = "Alamo, California"
 OUT_CSV = "alamo, ca_businesses.csv"
+
+
+def default_output_csv(location: str) -> str:
+    """Filename for CSV when --output is omitted (keeps legacy name for default Alamo)."""
+    if location.strip() == TOWN:
+        return OUT_CSV
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", location.strip()).strip("_").lower()
+    return f"{slug}_businesses.csv"
 
 # Nearby Search (New) returns at most 20 places per request (no pagination).
 # DISTANCE ranking + a denser grid reduces overlap vs a single POPULARITY top-20 per cell.
@@ -101,10 +110,17 @@ def get_all_places_cell(api_key: str, lat: float, lng: float, radius_m: float):
     return [row_from_place(p) for p in data.get("places") or []]
 
 
-def search_multiple_areas(api_key, base_lat, base_lng, radius, grid_size=7):
+def search_multiple_areas(
+    api_key,
+    base_lat,
+    base_lng,
+    radius,
+    grid_size=7,
+    lat_step=0.02,
+    lng_step=0.02,
+):
+    """grid_size x grid_size cells centered on (base_lat, base_lng); step in degrees."""
     all_places = []
-    lat_step = 0.02
-    lng_step = 0.02
     for i in range(grid_size):
         for j in range(grid_size):
             lat = base_lat + (i - grid_size // 2) * lat_step
@@ -115,31 +131,52 @@ def search_multiple_areas(api_key, base_lat, base_lng, radius, grid_size=7):
     return all_places
 
 
-def main(limit: int | None = None):
+def main(
+    limit: int | None = None,
+    location: str = TOWN,
+    output_csv: str | None = None,
+    grid_size: int = 7,
+    lat_step: float = 0.02,
+    lng_step: float = 0.02,
+):
     api_key = os.environ.get("GOOGLE_PLACE_API_KEY")
     if not api_key:
         raise SystemExit("Set GOOGLE_PLACE_API_KEY in your environment or .env file.")
 
-    base_lat, base_lng = geocode_town(TOWN, api_key)
+    base_lat, base_lng = geocode_town(location, api_key)
     if base_lat is None:
         raise SystemExit("Geocoding failed.")
 
+    out_path = output_csv or default_output_csv(location)
+
+    if grid_size < 1:
+        raise SystemExit("--grid-size must be at least 1")
+
     radius = 2000
-    grid_size = 7
 
     if limit is not None:
         cap = max(1, min(limit, 20))
         print(
-            f"Places API (New) single search at {TOWN} center "
+            f"Places API (New) single search at {location} center "
             f"(max {cap} results, DISTANCE rank, r={radius}m)..."
         )
         rows = get_all_places_cell(api_key, base_lat, base_lng, radius)[:cap]
     else:
+        n_cells = grid_size * grid_size
         print(
-            f"Places API (New) Nearby Search near {TOWN} "
-            f"(max 20/cell, DISTANCE rank, {grid_size}x{grid_size} grid)..."
+            f"Places API (New) Nearby Search near {location} "
+            f"(max 20/cell, DISTANCE rank, {grid_size}x{grid_size} grid, "
+            f"{n_cells} API calls, step {lat_step}/{lng_step} deg)..."
         )
-        rows = search_multiple_areas(api_key, base_lat, base_lng, radius, grid_size)
+        rows = search_multiple_areas(
+            api_key,
+            base_lat,
+            base_lng,
+            radius,
+            grid_size=grid_size,
+            lat_step=lat_step,
+            lng_step=lng_step,
+        )
 
     by_id = {}
     for row in rows:
@@ -159,12 +196,28 @@ def main(limit: int | None = None):
         "Place ID",
     ]
     df = df[[c for c in cols if c in df.columns]]
-    df.to_csv(OUT_CSV, index=False)
-    print(f"Saved {OUT_CSV}")
+    df.to_csv(out_path, index=False)
+    print(f"Saved {out_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Nearby Search export for Alamo, CA area.")
+    parser = argparse.ArgumentParser(
+        description="Nearby Search export around a geocoded location (default: Alamo, CA)."
+    )
+    parser.add_argument(
+        "--location",
+        default=TOWN,
+        metavar="ADDRESS",
+        help='Area to geocode, e.g. "Danville, California" (default: Alamo, California)',
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        dest="output_csv",
+        metavar="FILE",
+        help="Output CSV path (default: alamo, ca_businesses.csv for Alamo; else slug_businesses.csv)",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -172,5 +225,33 @@ if __name__ == "__main__":
         metavar="N",
         help="Only run one search at the town center and keep the first N rows (N≤20; API max per call).",
     )
+    parser.add_argument(
+        "--grid-size",
+        type=int,
+        default=7,
+        metavar="N",
+        help="N×N grid of search centers (default: 7). Larger = more coverage, more API calls.",
+    )
+    parser.add_argument(
+        "--lat-step",
+        type=float,
+        default=0.02,
+        metavar="DEG",
+        help="Degrees between grid rows (default: 0.02 ≈ 2.2 km).",
+    )
+    parser.add_argument(
+        "--lng-step",
+        type=float,
+        default=0.02,
+        metavar="DEG",
+        help="Degrees between grid columns (default: 0.02).",
+    )
     args = parser.parse_args()
-    main(limit=args.limit)
+    main(
+        limit=args.limit,
+        location=args.location,
+        output_csv=args.output_csv,
+        grid_size=args.grid_size,
+        lat_step=args.lat_step,
+        lng_step=args.lng_step,
+    )
